@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	btc_node_ip = "10.1.181.126:18332"
-	fee_rate    = int64(20)
+	btc_node_ip     = "10.1.181.126:18332"
+	fee_rate        = int64(20)
+	wallet_id       = 1001
+	amount_for_test = 5566
 )
 
 type UTXO struct {
@@ -27,26 +29,15 @@ type UTXO struct {
 
 var addrPk = map[string]string{
 	// P2PK
-	"mi7Xxy8KzyiHfbhajZ5v6oUvr8VkKCaxNs": "private_key",
-	"myrkeQzeBxBG6rvGBeyxkeEbJLJ8CZ3Fp5": "private_key",
+	"mi7Xxy8KzyiHfbhajZ5v6oUvr8VkKCaxNs": "private_key_hex",
+	"myrkeQzeBxBG6rvGBeyxkeEbJLJ8CZ3Fp5": "private_key_hex",
 
 	// P2PKH
-	"mugNaeKrJYTrVpvbjeUCXbkZE127gzMEhD": "private_key",
-	"mrSN4Peu5VV8ZVMoWojn4UtvhvarwWCohV": "private_key",
+	"mugNaeKrJYTrVpvbjeUCXbkZE127gzMEhD": "private_key_hex",
+	"mrSN4Peu5VV8ZVMoWojn4UtvhvarwWCohV": "private_key_hex",
 }
 
 func main() {
-	utxos := []UTXO{
-		UTXO{
-			TxHash: "34f920e779c3efd17ce0ab4c2cb2b49b83aa4bc693344e98c17bf52e72c742d2",
-			Idx:    uint32(0),
-		},
-		UTXO{
-			TxHash: "07548ae81f1ffd97df3d82dc6da8ee22a198201e9b5738c3a0e8ae973ccc6d2d",
-			Idx:    uint32(0),
-		},
-	}
-
 	client, err := rpcclient.New(&rpcclient.ConnConfig{
 		HTTPPostMode: true,
 		DisableTLS:   true,
@@ -65,24 +56,16 @@ func main() {
 	}
 	fmt.Printf("Block count : %v\n", block_count)
 
-	//txHash, err := chainhash.NewHashFromStr("f94bd770f427ffa9234fa229bbbf7314b82f967346928ebe5bd6e838acba482b")
-	//if err != nil {
-	//	fmt.Printf("Failed to parse hash str, err : %s\n", err)
-	//	return
-	//}
-	//tx, err := client.GetRawTransaction(txHash)
-	//if err != nil {
-	//	fmt.Printf("Failed to get raw tx from btcd, err : %s\n", err)
-	//	return
-	//}
-	//dumpTxOut(tx.MsgTx())
-
 	// Start constructing a tx
 	// Init a tx scruct
 	msgtx := wire.NewMsgTx(wire.TxVersion)
-	// Add input
+	change_addr := "mugNaeKrJYTrVpvbjeUCXbkZE127gzMEhD"
+	receiver_addr := "mrSN4Peu5VV8ZVMoWojn4UtvhvarwWCohV"
+
+	// Add inputs
 	var inputToalValue int64
-	var a, b, c int
+	var numP2PKHIns, numP2WPKHIns, numNestedP2WPKHIns int
+	utxos := getWalletUTXOs(wallet_id, amount_for_test)
 	for i := 0; i < len(utxos); i++ {
 		utxoHashOjb, err := chainhash.NewHashFromStr(utxos[i].TxHash)
 		if err != nil {
@@ -98,41 +81,39 @@ func main() {
 		}
 		inputToalValue += utxos[i].Tx.MsgTx().TxOut[utxos[i].Idx].Value
 
-		// Add input (need tx hash, idx of output at this point)
+		// Add input
 		in := wire.NewTxIn(wire.NewOutPoint(utxoHashOjb, utxos[i].Idx), nil, nil)
 		msgtx.AddTxIn(in)
 
+		// Count input script type
 		class := txscript.GetScriptClass(utxos[i].Tx.MsgTx().TxOut[utxos[i].Idx].PkScript)
 		if class == txscript.PubKeyHashTy {
-			a++
+			numP2PKHIns++
 		} else if class == txscript.WitnessV0PubKeyHashTy {
-			b++
+			numP2WPKHIns++
 		}
 		// TODO how to know wether it's nested p2wpkh or not???
 	}
 
-	// Add output
+	// Add outputs
 	var outputToalValue int64
-	err = addOutput(msgtx, "mrSN4Peu5VV8ZVMoWojn4UtvhvarwWCohV", int64(5566), &chaincfg.TestNet3Params)
+	err = addOutput(msgtx, receiver_addr, amount_for_test, &chaincfg.TestNet3Params)
 	if err != nil {
 		fmt.Printf("Failed to add output, %s\n", err)
 		return
 	}
-	outputToalValue += 5566
+	outputToalValue += amount_for_test
 
 	// Add change
-	estTxSize := EstimateVirtualSize(a, b, c, msgtx.TxOut, true)
+	estTxSize := EstimateVirtualSize(numP2PKHIns, numP2WPKHIns, numNestedP2WPKHIns, msgtx.TxOut, true)
 	fmt.Printf("EST TX size before add change output : %d\n", estTxSize)
 	fee := int64(estTxSize) * fee_rate
 	change := inputToalValue - outputToalValue - fee
-	err = addChangeOutput(msgtx, "mugNaeKrJYTrVpvbjeUCXbkZE127gzMEhD", change, &chaincfg.TestNet3Params)
+	err = addOutput(msgtx, change_addr, change, &chaincfg.TestNet3Params)
 
 	// Sign TX
 	for k := 0; k < len(msgtx.TxIn); k++ {
 		// the third parameter is a little bit confused, my current conclusion is the index of coresponded input
-		/*		sigScript, err := txscript.SignTxOutput(&chaincfg.TestNet3Params,
-				msgtx, 0, prevTX.MsgTx().TxOut[1].PkScript, txscript.SigHashAll,
-				txscript.KeyClosure(lookupKey), nil, nil)*/
 		utxo := utxos[k]
 		sigScript, err := txscript.SignTxOutput(&chaincfg.TestNet3Params,
 			msgtx, k, utxo.Tx.MsgTx().TxOut[utxo.Idx].PkScript, txscript.SigHashAll, txscript.KeyClosure(lookupKey), nil, nil)
